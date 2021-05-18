@@ -368,6 +368,7 @@ execute procedure music.update_validate_data_func();
 
 -- при добавлении нового трека played_to_dttm старых записей меняется
 
+
 create or replace function music.update_track_listening_func() returns trigger as
 $$
 begin
@@ -395,7 +396,7 @@ create trigger update_track_listening
 
 execute procedure music.update_track_listening_func();
 
---
+-- добавляет пользователю с id user_to_add_id плейлист состоящий из песен исполнителя singer_to_add_id
 
 create or replace procedure music.create_playlist_from_singer(singer_to_add_id int, user_to_add_id int)
 as
@@ -416,14 +417,16 @@ begin
         raise exception 'user does not exists';
     end if;
 
-    execute 'select coalesce(0, max(playlist_id)) from music.playlists' into new_playlist_id;
+    execute 'select coalesce(max(playlist_id), 0) from music.playlists' into new_playlist_id;
     new_playlist_id := new_playlist_id + 1;
     insert into music.playlists values (new_playlist_id, user_to_add_id, 'All of ' || singer_name,
-                                        'Плейлист содержит все песни исполнителя' || singer_name);
+                                        'Плейлист содержит все песни исполнителя ' || singer_name);
     for current_track_id in select track_id from music.singers_on_track where singer_id = singer_to_add_id
         loop
-            insert into music.songs_in_playlist values(playlist_id, current_track_id);
+            insert into music.songs_in_playlist values(new_playlist_id, current_track_id);
         end loop;
 end;
 $$
     language plpgsql;
+
+call music.create_playlist_from_singer(6, 1);

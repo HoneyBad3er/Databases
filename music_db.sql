@@ -20,13 +20,12 @@ create table music.validate_user_data
     constraint subscr_version primary key (user_id, valid_from_dttm)
 );
 
-create table music.tracks
-(
-    track_id     integer primary key,
-    track_nm     varchar(100) not null,
-    premiere_dt  date,
-    duration_sec integer      not null check (duration_sec > 0),
-    genre        varchar(100)
+create table music.tracks (
+    track_id        integer       primary key,
+    track_nm        varchar(100)  not null,
+    premiere_dt     date,
+    duration_sec    interval       not null,
+    genre           varchar(100)
 );
 
 create table music.singers
@@ -55,7 +54,7 @@ create table music.singers_on_track
     foreign key (track_id) references music.tracks (track_id) on delete cascade
 );
 
-create table music.songs_in_playlist
+create table music.track_in_playlist
 (
     playlist_id integer not null,
     track_id    integer not null,
@@ -86,6 +85,136 @@ create table music.track_listening (
     foreign key (device_id) references music.devices(device_id) on delete cascade
 );
 
+-- при добавлении новой версии подписки пользователя устанавливает valid_to для старой и вставляет новую
+create or replace function music.update_validate_data_func() returns trigger as
+$$
+begin
+    if (new.valid_from_dttm is null) then
+        new.valid_from_dttm = now();
+    end if;
+
+    update music.validate_user_data
+    set valid_to_dttm = new.valid_from_dttm
+    where user_id = new.user_id
+      and valid_to_dttm > new.valid_from_dttm;
+
+    return new;
+
+end;
+$$ language plpgsql;
+
+
+create trigger update_valida_data
+    before insert
+    on music.validate_user_data
+    for each row
+execute procedure music.update_validate_data_func();
+
+-- при добавлении нового трека played_to_dttm старых записей меняется
+create or replace function music.update_track_listening_func() returns trigger as
+$$
+begin
+
+     if (new.position_sec) then
+        new.position_sec = interval '00:00:00';
+    end if;
+
+    update music.track_listening
+    set played_to_dttm = new.played_from_dttm
+    where device_id = new.device_id
+      and played_to_dttm > new.played_from_dttm;
+
+    return new;
+
+
+end;
+
+$$ language plpgsql;
+
+create trigger update_track_listening
+    before insert
+    on music.track_listening
+    for each row
+
+execute procedure music.update_track_listening_func();
+
+-- добавляет пользователю с id user_to_add_id плейлист состоящий из песен исполнителя singer_to_add_id
+create or replace procedure music.create_playlist_from_singer(singer_to_add_id int, user_to_add_id int)
+as
+$$
+declare
+    current_track_id int;
+    new_playlist_id int;
+    singer_name text;
+    singer_cnt int := 0;
+    user_cnt int := 0;
+begin
+    execute 'select singer_nm from music.singers where singer_id = $1'
+        into singer_name using singer_to_add_id;
+
+    execute 'select coalesce(count(user_id), 0) from music.users where user_id = $1' into user_cnt using user_to_add_id;
+
+    if user_cnt = 0 then
+        raise exception 'user does not exists';
+    end if;
+
+    execute 'select coalesce(count(singer_id), 0) from music.singers where singer_id = $1' into singer_cnt
+        using singer_to_add_id;
+
+    if singer_cnt = 0 then
+        raise exception 'singer does not exists';
+    end if;
+
+    execute 'select coalesce(max(playlist_id), 0) from music.playlists' into new_playlist_id;
+    new_playlist_id := new_playlist_id + 1;
+    insert into music.playlists values (new_playlist_id, user_to_add_id, 'All of ' || singer_name,
+                                        'Плейлист содержит все песни исполнителя ' || singer_name);
+    for current_track_id in select track_id from music.singers_on_track where singer_id = singer_to_add_id
+        loop
+            insert into music.track_in_playlist values(new_playlist_id, current_track_id);
+        end loop;
+end;
+$$
+    language plpgsql;
+
+-- позволяет добавлять группы исполнителей (feat) для одного трека
+-- если хотя бы одного исполнителя нет в БД singers, то кидает исключение
+create or replace procedure music.add_track(track_name text, date timestamp, duracion_sec interval, track_genre varchar(100),
+                                            artists_id int array)
+as
+    $$
+    declare
+        new_track_id int;
+        current_singer_id int;
+        singers_cnt int := 0;
+        index int := 1;
+        len integer := array_length(artists_id, 1);
+    begin
+        for index in 1..len by 1
+        loop
+            current_singer_id := artists_id[index];
+            execute 'select coalesce(count(singer_id), 0) from music.singers where singer_id = $1' into singers_cnt
+            using current_singer_id;
+            if singers_cnt = 0 then
+                raise exception 'singer with id = % does not exists', current_singer_id;
+            end if;
+        end loop;
+
+        execute 'select coalesce(max(track_id), 0) from music.tracks' into new_track_id;
+        new_track_id := new_track_id + 1;
+
+        insert into music.tracks values(new_track_id, track_name, date, duracion_sec, track_genre);
+
+         for index in 1..len by 1
+        loop
+            current_singer_id := artists_id[index];
+            insert into music.singers_on_track values (new_track_id, current_singer_id);
+        end loop;
+
+    end;
+    $$
+    language plpgsql;
+
 -- ВСТАВКА
 set datestyle = 'DMY';
 
@@ -102,26 +231,26 @@ values (1, 'Ростов Николай Ильич', '17.03.1765'),
        (10, 'Сперанский Михаил Михайлович', '12.01.1772');
 
 insert into music.tracks
-values (1, 'Rum & Coca-Cola', '01.01.1790', 198, 'Jazz'),
-       (2, 'Sentimental Journey', '02.01.1791', 241, 'Punk'),
-       (3, 'Till The End of Time', '05.04.1792', 207, 'Polka'),
-       (4, 'My Dreams Are Getting Better All the Time', '21.01.1790', 176, 'Rock music'),
-       (5, 'On the Atchison, Topeka & the Santa Fe', '11.07.1797', 222, 'Rock music'),
-       (6, 'It’s Been a Long, Long Time', '11.11.1799', 245, 'Popular music'),
-       (7, 'I Can’t Begin to Tell You', '11.09.1792', 194, 'Popular music'),
-       (8, 'Ac-cent-tchu-ate the Positive', '01.01.1792', 227, 'Popular music'),
-       (9, 'Chickery Chick', '01.01.1791', 172, 'Jazz'),
-       (10, 'There! I’ve Said it Again', '01.01.1786', 266, 'Jazz'),
-       (11, 'Candy', '01.01.1780', 258, 'Jazz'),
-       (12, 'I’m Beginning to See The Light', '01.01.1790', 272, 'Jazz'),
-       (13, 'On the Atchison, Topeka & the Santa Fe', '01.01.1779', 256, 'Reggae'),
-       (14, 'I’m Beginning to See The Light', '01.01.1795', 246, 'Reggae'),
-       (15, 'It’s Been a Long, Long Time', '01.01.1792', 175, 'Pop'),
-       (16, 'Nancy, With The Laughing Face', '01.01.1793', 184, 'Classical'),
-       (17, 'Caledonia', '01.01.1792', 270, 'Classical'),
-       (18, 'I’m Beginning to See The Light', '01.01.1790', 140, 'Classical'),
-       (19, 'Ac-cent-tchu-ate the Positive', '01.01.1795', 250, 'Classical'),
-       (20, 'Dream', '01.01.1794', 262, 'Easy Listening');
+values (1, 'Rum & Coca-Cola', '01.01.1790', interval'198 sec', 'Jazz'),
+       (2, 'Sentimental Journey', '02.01.1791', interval'241 sec', 'Punk'),
+       (3, 'Till The End of Time', '05.04.1792', interval'207 sec', 'Polka'),
+       (4, 'My Dreams Are Getting Better All the Time', '21.01.1790', interval'176 sec', 'Rock music'),
+       (5, 'On the Atchison, Topeka & the Santa Fe', '11.07.1797', interval'222 sec', 'Rock music'),
+       (6, 'It’s Been a Long, Long Time', '11.11.1799', interval '245 sec', 'Popular music'),
+       (7, 'I Can’t Begin to Tell You', '11.09.1792', interval '194 sec', 'Popular music'),
+       (8, 'Ac-cent-tchu-ate the Positive', '01.01.1792', interval '227 sec', 'Popular music'),
+       (9, 'Chickery Chick', '01.01.1791', interval '172 sec', 'Jazz'),
+       (10, 'There! I’ve Said it Again', '01.01.1786', interval '266 sec', 'Jazz'),
+       (11, 'Candy', '01.01.1780', interval '258 sec', 'Jazz'),
+       (12, 'I’m Beginning to See The Light', '01.01.1790', interval '272 sec', 'Jazz'),
+       (13, 'On the Atchison, Topeka & the Santa Fe', '01.01.1779', interval '256 sec', 'Reggae'),
+       (14, 'I’m Beginning to See The Light', '01.01.1795', interval '246 sec', 'Reggae'),
+       (15, 'It’s Been a Long, Long Time', '01.01.1792', interval '175 sec', 'Pop'),
+       (16, 'Nancy, With The Laughing Face', '01.01.1793', interval '184 sec', 'Classical'),
+       (17, 'Caledonia', '01.01.1792', interval '270 sec', 'Classical'),
+       (18, 'I’m Beginning to See The Light', '01.01.1790', interval '140 sec', 'Classical'),
+       (19, 'Ac-cent-tchu-ate the Positive', '01.01.1795', interval '250 sec', 'Classical'),
+       (20, 'Dream', '01.01.1794', interval '262 sec', 'Easy Listening');
 
 insert into music.singers
 values (1, 'The Andrews Sisters'),
@@ -172,7 +301,15 @@ values (1, 1),
        (19, 1),
        (20, 20);
 
+insert into music.playlists
+values (1, 1, 'My', 'Мой плейлист, я его люблю'),
+       (2, 1, 'Тренировки', 'Плейлист для тренировок'),
+       (3, 3, 'Веселая', 'Для хорошего настроения'),
+       (4, 4, 'Драйв', 'Подборка на случай нехватки адреналина)'),
+       (5, 4, 'Спокойная', 'Если адреналина слишком много'),
+       (6, 8, 'Новый год!', 'Закройте глаза. Снег кружится летает, летает...');
 
+call music.create_playlist_from_singer(2, 4);
 -- ЗАПРОСЫ
 
 -- 1) Прослушивания трека по дням
@@ -204,7 +341,7 @@ select u.user_nm,
        p.playlist_nm,
        count(*) over (partition by p.playlist_id) as amount_on_playlist
 from music.playlists as p
-         inner join music.songs_in_playlist as sip
+         inner join music.track_in_playlist as sip
                     on p.playlist_id = sip.playlist_id
          inner join music.users as u
                     on u.user_id = p.user_id
@@ -222,7 +359,7 @@ select u.user_nm,
 from music.users as u
          inner join music.playlists as p
                     on u.user_id = p.user_id
-         inner join music.songs_in_playlist as sip
+         inner join music.track_in_playlist as sip
                     on sip.playlist_id = p.playlist_id
          inner join music.tracks as t
                     on t.track_id = sip.track_id
@@ -247,18 +384,13 @@ select u.user_id,
        u.birth_dt
 from music.users as u;
 
-
 -- singer
-
-
 create view music_view.singer_view as
 select s.singer_id,
        regexp_replace(s.singer_nm, '[[:alnum:]]', '*', 'g') as singer_name
 from music.singers as s;
 
 -- validate_user_data
-
-
 create view music_view.data_view as
 select regexp_replace(data.card_nm, '[[:digit:]]', '*', 'g') as card_number,
        regexp_replace(split_part(data.mail_nm, '@', 1), '[[:alpha:]]', '*', 'g') || '@' ||
@@ -268,7 +400,6 @@ from music.validate_user_data as data;
 
 
 -- tracks
-
 create view music_view.tracks_view as
 select t.track_nm,
        t.premiere_dt,
@@ -276,24 +407,19 @@ select t.track_nm,
 from music.tracks as t;
 
 -- playlist
-
 create view music_view.playlist_view as
 select p.playlist_nm,
        p.playlist_desc
 from music.playlists as p;
 
 -- devices
-
 create view music_view.devices_view as
 select d.device_nm as device_name
 from music.devices as d;
 
-
-
 -- VIEW (ADVANCED)
 
 -- 1) user and his songs with playlist
-
 create view music_view.users_and_songs as
 select us.user_nm,
        p.playlist_nm,
@@ -301,14 +427,12 @@ select us.user_nm,
 from music.users as us
          inner join music.playlists as p
                     on p.user_id = us.user_id
-         inner join music.songs_in_playlist as sip
+         inner join music.track_in_playlist as sip
                     on sip.playlist_id = p.playlist_id
          inner join music.tracks as t
                     on t.track_id = sip.track_id;
 
-
 -- 2) tracks_listen and device
-
 create view music_view.songs_lsiten_with_singer as
 select d.device_nm,
        tl.played_from_dttm,
@@ -326,7 +450,6 @@ from music.tracks as t
                     on s.singer_id = sot.singer_id;
 
 -- 3) User его колличество прослушиваний и последнее
-
 create view music_view.users_plays as
 select u.user_nm              as user_name,
        count(*)               as amount_songs,
@@ -338,95 +461,5 @@ from music.users as u
                     on tl.device_id = d.device_id
 group by u.user_nm
 order by amount_songs asc;
-
-
--- при добавлении новой версии подписки пользователя устанавливает valid_to для старой и вставляет новую
-
-create or replace function music.update_validate_data_func() returns trigger as
-$$
-begin
-    if (new.valid_from_dttm is null) then
-        new.valid_from_dttm = now();
-    end if;
-
-    update music.validate_user_data
-    set valid_to_dttm = new.valid_from_dttm
-    where user_id = new.user_id
-      and valid_to_dttm > new.valid_from_dttm;
-
-    return new;
-
-end;
-$$ language plpgsql;
-
-
-create trigger update_valida_data
-    before insert
-    on music.validate_user_data
-    for each row
-execute procedure music.update_validate_data_func();
-
--- при добавлении нового трека played_to_dttm старых записей меняется
-
-
-create or replace function music.update_track_listening_func() returns trigger as
-$$
-begin
-
-     if (new.position_sec) then
-        new.position_sec = interval '00:00:00';
-    end if;
-
-    update music.track_listening
-    set played_to_dttm = new.played_from_dttm
-    where device_id = new.device_id
-      and played_to_dttm > new.played_from_dttm;
-
-    return new;
-
-
-end;
-
-$$ language plpgsql;
-
-create trigger update_track_listening
-    before insert
-    on music.track_listening
-    for each row
-
-execute procedure music.update_track_listening_func();
-
--- добавляет пользователю с id user_to_add_id плейлист состоящий из песен исполнителя singer_to_add_id
-
-create or replace procedure music.create_playlist_from_singer(singer_to_add_id int, user_to_add_id int)
-as
-$$
-declare
-    current_track_id int;
-    new_playlist_id int;
-    singer_name text;
-    singer_cnt int := 0;
-    user_cnt int := 0;
-begin
-    execute 'select singer_nm from music.singers where singer_id = $1'
-        into singer_name using singer_to_add_id;
-
-    execute 'select count(user_id) from music.users' into user_cnt;
-
-    if user_cnt = 0 then
-        raise exception 'user does not exists';
-    end if;
-
-    execute 'select coalesce(max(playlist_id), 0) from music.playlists' into new_playlist_id;
-    new_playlist_id := new_playlist_id + 1;
-    insert into music.playlists values (new_playlist_id, user_to_add_id, 'All of ' || singer_name,
-                                        'Плейлист содержит все песни исполнителя ' || singer_name);
-    for current_track_id in select track_id from music.singers_on_track where singer_id = singer_to_add_id
-        loop
-            insert into music.songs_in_playlist values(new_playlist_id, current_track_id);
-        end loop;
-end;
-$$
-    language plpgsql;
 
 call music.create_playlist_from_singer(6, 1);

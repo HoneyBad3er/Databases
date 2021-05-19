@@ -1,3 +1,4 @@
+-- drop schema music cascade ;
 create schema music;
 
 create table music.users
@@ -68,7 +69,7 @@ create table music.devices
 (
     device_id integer primary key,
     user_id   integer,
-    device_nm varchar[50],
+    device_nm varchar(50),
 
     foreign key (user_id) references music.users (user_id) on delete cascade
 );
@@ -79,7 +80,6 @@ create table music.track_listening (
     device_id        integer       not null,
     played_from_dttm     timestamp     not null,
     played_to_dttm timestamp not null,
-    position_sec    interval,
 
     foreign key (track_id) references music.tracks(track_id) on delete cascade,
     foreign key (device_id) references music.devices(device_id) on delete cascade
@@ -114,10 +114,6 @@ execute procedure music.update_validate_data_func();
 create or replace function music.update_track_listening_func() returns trigger as
 $$
 begin
-
-     if (new.position_sec) then
-        new.position_sec = interval '00:00:00';
-    end if;
 
     update music.track_listening
     set played_to_dttm = new.played_from_dttm
@@ -310,9 +306,24 @@ values (1, 1, 'My', 'Мой плейлист, я его люблю'),
        (6, 8, 'Новый год!', 'Закройте глаза. Снег кружится летает, летает...');
 
 call music.create_playlist_from_singer(2, 4);
+
+insert into music.devices
+values (1, 1, 'ipod nano 7'),
+       (2, 1, 'iphone X'),
+       (3, 2, 'ipod shuffle'),
+       (4, 3, 'ipod shuffle'),
+       (5, 4, 'ipod shuffle'),
+       (6, 5, 'ipod shuffle');
+
+insert into music.track_listening
+    values (1, 2, 4, '1795-06-04 10:45:34', '1795-06-04 10:46:24'),
+           (2, 1, 3, '1795-06-04 11:45:34', '1795-06-04 11:47:24'),
+           (3, 2, 4, '1795-06-04 12:01:04', '1795-06-04 12:03:00'),
+           (4, 1, 3, '1795-06-04 12:56:34', '1795-06-04 12:56:59'),
+           (5, 2, 4, '1795-06-04 13:15:15', '1795-06-04 12:18:00');
 -- ЗАПРОСЫ
 
--- 1) Прослушивания трека по дням
+-- 1) Кумулятивная сумма количества прослушанных треков
 
 select t.track_nm                                                           as track_name,
        tl.played_from_dttm,
@@ -332,7 +343,7 @@ from music.singers_on_track as sot
          inner join music.track_listening as tl
                     on tl.track_id = t.track_id
 group by t.track_nm
-order by count(*) asc;
+order by count(*) desc;
 
 
 -- 3) Список пользователей, плэйлистов и колличества их прослушивания
@@ -352,8 +363,6 @@ from music.playlists as p
 
 
 -- 4) Колличество различных исполнителей для юзера
-
-
 select u.user_nm,
        count(s.singer_id) amount_different_singers
 from music.users as u
@@ -371,7 +380,7 @@ group by u.user_nm;
 
 
 -- VIEW VIEW VIEW
-
+-- drop schema music_view cascade;
 create schema music_view;
 
 -- VIEW сокрытие

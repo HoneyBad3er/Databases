@@ -122,7 +122,6 @@ begin
 
     return new;
 
-
 end;
 
 $$ language plpgsql;
@@ -133,6 +132,52 @@ create trigger update_track_listening
     for each row
 
 execute procedure music.update_track_listening_func();
+
+-- заполняем данные дефолтными значениями
+create or replace function music.insert_default_valid_data_func() returns trigger as
+$$
+begin
+
+    insert into music.validate_user_data
+        values (new.user_id, null, '0', 'free');
+    return new;
+
+end;
+
+$$ language plpgsql;
+
+create trigger insert_default_valid_data
+    before insert
+    on music.users
+    for each row
+execute procedure music.insert_default_valid_data_func();
+
+-- проверяем на мульти аккаунт
+create or replace function music.check_email_duplicate_func() returns trigger as
+$$
+declare
+    other_user_id integer;
+begin
+    for other_user_id in select user_id
+                         from music.validate_user_data
+                         where music.validate_user_data.mail_nm = new.mail_nm
+                           and music.validate_user_data.valid_to_dttm >= now()
+        loop
+            if other_user_id = new.user_id then
+                raise exception 'email % already exists', new.mail_nm;
+            end if;
+        end loop;
+        return new;
+end;
+
+$$ language plpgsql;
+
+create trigger check_email_duplicate
+    before insert
+        or update
+    on music.validate_user_data
+    for each row
+execute procedure music.check_email_duplicate_func();
 
 -- добавляет пользователю с id user_to_add_id плейлист состоящий из песен исполнителя singer_to_add_id
 create or replace procedure music.create_playlist_from_singer(singer_to_add_id int, user_to_add_id int)
@@ -210,6 +255,7 @@ as
     end;
     $$
     language plpgsql;
+
 
 -- ВСТАВКА
 set datestyle = 'DMY';
